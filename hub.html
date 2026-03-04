@@ -1,0 +1,27 @@
+<head>
+
+<meta charset="utf-8" />
+<title>AI Work Item Assistant</title>
+
+<!-- Azure DevOps SDK -->
+<script src="lib/SDK.min.js"></script>
+
+<script>
+VSS.init({
+    explicitNotifyLoaded: true,
+    usePlatformStyles: true
+});
+
+VSS.ready(function () {
+    console.log("AI Work Item Assistant Loaded");
+    VSS.notifyLoadSucceeded();
+});
+</script>
+
+<!-- Styles -->
+<link rel="stylesheet" href="hub.css" />
+
+<!-- App JS -->
+<script src="hub.js" defer></script>
+
+</head>
