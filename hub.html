@@ -1,27 +1,234 @@
-<head>
+// ------------------------------
+// CONFIG: set your Container App base URL
+// Example: https://myapp.azurecontainerapps.io
+// ------------------------------
+const BACKEND_BASE_URL = "https://YOUR-CONTAINER-APP-URL";
 
-<meta charset="utf-8" />
-<title>AI Work Item Assistant</title>
+// DOM
+const witTypeEl = document.getElementById("witType");
+const detailLevelEl = document.getElementById("detailLevel");
+const notesEl = document.getElementById("notes");
+const generateBtn = document.getElementById("generateBtn");
+const createBtn = document.getElementById("createBtn");
+const clearBtn = document.getElementById("clearBtn");
+const statusEl = document.getElementById("status");
+const previewEl = document.getElementById("preview");
+const createdLinkEl = document.getElementById("createdLink");
+const contextInfoEl = document.getElementById("contextInfo");
 
-<!-- Azure DevOps SDK -->
-<script src="lib/SDK.min.js"></script>
+let lastGenerated = null;
 
-<script>
-VSS.init({
-    explicitNotifyLoaded: true,
-    usePlatformStyles: true
+function setStatus(msg) {
+  statusEl.textContent = msg || "";
+}
+
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function buildPreview(gen) {
+  const lines = [];
+  lines.push(`Title: ${gen.title || ""}`);
+  lines.push("");
+  lines.push("Description:");
+  lines.push(gen.description || "");
+  lines.push("");
+  if (Array.isArray(gen.acceptanceCriteria)) {
+    lines.push("Acceptance Criteria:");
+    gen.acceptanceCriteria.forEach((x, i) => lines.push(`  ${i + 1}. ${x}`));
+    lines.push("");
+  }
+  if (Array.isArray(gen.tasks)) {
+    lines.push("Tasks:");
+    gen.tasks.forEach((x, i) => lines.push(`  ${i + 1}. ${x}`));
+    lines.push("");
+  }
+  if (Array.isArray(gen.assumptions)) {
+    lines.push("Assumptions:");
+    gen.assumptions.forEach((x, i) => lines.push(`  ${i + 1}. ${x}`));
+    lines.push("");
+  }
+  if (typeof gen.confidence === "number") {
+    lines.push(`Confidence: ${gen.confidence}`);
+  }
+  return lines.join("\n");
+}
+
+function buildHtmlDescription(gen) {
+  // ADO description is HTML (commonly). We'll convert basic blocks safely.
+  const title = escapeHtml(gen.title || "");
+  const desc = escapeHtml(gen.description || "");
+  const ac = Array.isArray(gen.acceptanceCriteria) ? gen.acceptanceCriteria : [];
+  const tasks = Array.isArray(gen.tasks) ? gen.tasks : [];
+  const assumptions = Array.isArray(gen.assumptions) ? gen.assumptions : [];
+  const confidence = (typeof gen.confidence === "number") ? gen.confidence : null;
+
+  const list = (items) => items.map(x => `<li>${escapeHtml(x)}</li>`).join("");
+
+  return `
+    <div>
+      <p>${desc.replaceAll("\n", "<br/>")}</p>
+
+      ${ac.length ? `<h3>Acceptance Criteria</h3><ol>${list(ac)}</ol>` : ""}
+      ${tasks.length ? `<h3>Tasks</h3><ol>${list(tasks)}</ol>` : ""}
+      ${assumptions.length ? `<h3>Assumptions</h3><ul>${list(assumptions)}</ul>` : ""}
+      ${confidence !== null ? `<p><b>Confidence:</b> ${escapeHtml(confidence)}</p>` : ""}
+    </div>
+  `.trim();
+}
+
+async function getAdoContext() {
+  const ctx = VSS.getWebContext();
+  const projectName = ctx?.project?.name;
+  const collectionUri = ctx?.collection?.uri; // e.g. https://dev.azure.com/org/
+  return { ctx, projectName, collectionUri };
+}
+
+async function getAccessToken() {
+  // Returns ADO OAuth token for REST calls from the extension.
+  const token = await VSS.getAccessToken();
+  return token;
+}
+
+async function callGenerateApi(notes, workItemType, detailLevel) {
+  const url = `${BACKEND_BASE_URL.replace(/\/$/, "")}/api/generate`;
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ notes, workItemType, detailLevel })
+  });
+
+  if (!resp.ok) {
+    const t = await resp.text();
+    throw new Error(`Generate API failed (${resp.status}): ${t}`);
+  }
+
+  return await resp.json();
+}
+
+async function createWorkItemInAdo(workItemType, gen) {
+  const { projectName, collectionUri } = await getAdoContext();
+  if (!projectName || !collectionUri) {
+    throw new Error("Unable to detect project/org context from Azure DevOps.");
+  }
+
+  const token = await getAccessToken();
+
+  // Work item creation endpoint:
+  // POST {org}/{project}/_apis/wit/workitems/${type}?api-version=...
+  const wiTypeEncoded = encodeURIComponent(workItemType);
+  const url = `${collectionUri}${encodeURIComponent(projectName)}/_apis/wit/workitems/$${wiTypeEncoded}?api-version=7.1-preview.3`;
+
+  const patch = [
+    { op: "add", path: "/fields/System.Title", value: gen.title || "AI Generated Work Item" },
+    { op: "add", path: "/fields/System.Description", value: buildHtmlDescription(gen) }
+  ];
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json-patch+json",
+      "Authorization": `Bearer ${token}`
+    },
+    body: JSON.stringify(patch)
+  });
+
+  if (!resp.ok) {
+    const t = await resp.text();
+    throw new Error(`Create work item failed (${resp.status}): ${t}`);
+  }
+
+  return await resp.json();
+}
+
+// UI wiring
+VSS.ready(async function () {
+  try {
+    const { projectName, collectionUri } = await getAdoContext();
+    contextInfoEl.textContent = projectName ? `Project: ${projectName}` : "";
+    setStatus("Ready.");
+  } catch (e) {
+    setStatus(`Ready (context warning): ${e.message}`);
+  }
 });
 
-VSS.ready(function () {
-    console.log("AI Work Item Assistant Loaded");
-    VSS.notifyLoadSucceeded();
+generateBtn.addEventListener("click", async () => {
+  createdLinkEl.innerHTML = "";
+  createBtn.disabled = true;
+  lastGenerated = null;
+
+  const notes = notesEl.value.trim();
+  const workItemType = witTypeEl.value;
+  const detailLevel = detailLevelEl.value;
+
+  if (!BACKEND_BASE_URL || BACKEND_BASE_URL.includes("YOUR-CONTAINER-APP-URL")) {
+    setStatus("Set BACKEND_BASE_URL in static/hub.js first.");
+    return;
+  }
+
+  if (!notes) {
+    setStatus("Please paste notes first.");
+    return;
+  }
+
+  setStatus("Generating…");
+  previewEl.textContent = "Generating…";
+
+  try {
+    const gen = await callGenerateApi(notes, workItemType, detailLevel);
+
+    // Expecting shape: { title, description, acceptanceCriteria[], tasks[], assumptions[], confidence }
+    lastGenerated = gen;
+
+    previewEl.textContent = buildPreview(gen);
+    createBtn.disabled = false;
+    setStatus("Generated. Review preview, then click Create.");
+  } catch (e) {
+    previewEl.textContent = "Generation failed.";
+    setStatus(e.message);
+  }
 });
-</script>
 
-<!-- Styles -->
-<link rel="stylesheet" href="hub.css" />
+createBtn.addEventListener("click", async () => {
+  if (!lastGenerated) return;
 
-<!-- App JS -->
-<script src="hub.js" defer></script>
+  const workItemType = witTypeEl.value;
+  setStatus("Creating work item in Azure DevOps…");
+  createdLinkEl.innerHTML = "";
 
-</head>
+  try {
+    const created = await createWorkItemInAdo(workItemType, lastGenerated);
+
+    const id = created?.id;
+    const url = created?.url; // API URL, not web URL
+    // Build web URL from context
+    const { projectName, collectionUri } = await getAdoContext();
+    const webUrl = (id && projectName && collectionUri)
+      ? `${collectionUri}${encodeURIComponent(projectName)}/_workitems/edit/${id}`
+      : null;
+
+    setStatus(`Created work item ${id}.`);
+    if (webUrl) {
+      createdLinkEl.innerHTML = `<a href="${webUrl}" target="_blank" rel="noreferrer">Open Work Item #${id}</a>`;
+    } else {
+      createdLinkEl.textContent = url ? `Created. API URL: ${url}` : "Created.";
+    }
+  } catch (e) {
+    setStatus(e.message);
+  }
+});
+
+clearBtn.addEventListener("click", () => {
+  notesEl.value = "";
+  previewEl.textContent = "Nothing generated yet.";
+  createdLinkEl.innerHTML = "";
+  createBtn.disabled = true;
+  lastGenerated = null;
+  setStatus("Cleared.");
+});
