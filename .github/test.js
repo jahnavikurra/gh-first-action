@@ -1,17 +1,13 @@
-VSS.ready(function () {
-  const generateBtn = document.getElementById("generateBtn");
-  const statusEl = document.getElementById("status");
+SDK.init();
 
-  if (!generateBtn || !statusEl) {
-    console.error("Missing DOM elements. Check IDs in hub.html.");
-    return;
-  }
+SDK.ready().then(() => {
 
-  function setStatus(msg) {
-    statusEl.textContent = msg || "";
-  }
+    console.log("AI Work Item Assistant loaded");
 
-  generateBtn.addEventListener("click", async () => {
-    setStatus("Clicked generate...");
-  });
+    const container = document.createElement("div");
+    container.style.padding = "20px";
+    container.innerHTML = "<h2>AI Work Item Assistant Loaded Successfully 🚀</h2>";
+
+    document.body.appendChild(container);
+
 });
